@@ -1,6 +1,17 @@
 -- ========================================
--- CC Music Player v4.0 (Ultimate Edition)
+-- CC Music Player v5.0
 -- ========================================
+
+-- FORWARD DECLARATIONS - Declare all modules first
+local Utils = {}
+local Config = {}
+local ThemeManager = {}
+local StateManager = {}
+local DataManager = {}
+local EventManager = {}
+local NetworkManager = {}
+local AudioManager = {}
+local MusicPlayer = {}
 
 -- CONFIGURATION
 local CONFIG = {
@@ -12,8 +23,8 @@ local CONFIG = {
     update_interval = 0.25,
     audio_sample_rate = 48000,
     audio_chunk_size = 2^12,
-    version = "4.0",
-    update_check_url = "https://raw.githubusercontent.com/yourrepo/ccmusic/main/version.txt",
+    version = "5.0",
+    update_check_url = "https://raw.githubusercontent.com/edujime23/computercraft-music-player/refs/heads/main/version.txt",
 
     -- File paths
     queue_file = "music_queue.dat",
@@ -132,6 +143,19 @@ local REPEAT_MODES = { OFF = 0, ONE = 1, ALL = 2 }
 local TABS = { NOW_PLAYING = 1, SEARCH = 2, QUEUE = 3, PLAYLISTS = 4, HISTORY = 5, FAVORITES = 6, SETTINGS = 7, DIAGNOSTICS = 8 }
 local VIS_MODES = { BARS = 1, WAVE = 2, SPECTRUM = 3, VU = 4 }
 
+-- UI LAYOUT CONSTANTS
+local TAB_LIST_WIDTH = 15
+local TAB_DATA = {
+    { id = TABS.NOW_PLAYING,    name = "Now Playing" },
+    { id = TABS.SEARCH,       name = "Search" },
+    { id = TABS.QUEUE,        name = "Queue" },
+    { id = TABS.PLAYLISTS,    name = "Playlists" },
+    { id = TABS.HISTORY,      name = "History" },
+    { id = TABS.FAVORITES,    name = "Favorites" },
+    { id = TABS.SETTINGS,     name = "Settings" },
+    { id = TABS.DIAGNOSTICS,  name = "Diagnostics" }
+}
+
 -- HOTKEYS
 local HOTKEYS = {
     play_pause = keys.p,
@@ -158,6 +182,7 @@ local State = {
     current_tab = TABS.NOW_PLAYING,
     waiting_input = false,
     input_text = "",
+    input_context = nil,
     status_message = nil,
     status_color = colors.white,
     status_timer = nil,
@@ -290,6 +315,78 @@ local load_state
 local apply_theme
 local show_notification
 
+-- CORE UTILITIES
+Utils = {
+    -- Error handling with proper logging
+    try = function(fn, catch_fn)
+        local success, result = pcall(fn)
+        if not success then
+            if catch_fn then catch_fn(result) end
+            return nil, result
+        end
+        return result
+    end,
+
+    -- Safe table access with defaults
+    safeGet = function(tbl, key, default)
+        if not tbl or type(tbl) ~= "table" then return default end
+        local value = tbl[key]
+        return value ~= nil and value or default
+    end,
+
+    -- Clamp values
+    clamp = function(value, min_val, max_val)
+        return math.max(min_val, math.min(max_val, value or 0))
+    end,
+
+    -- Format time safely
+    formatTime = function(seconds)
+        if not seconds or type(seconds) ~= "number" or seconds < 0 then
+            return "--:--"
+        end
+        local mins = math.floor(seconds / 60)
+        local secs = math.floor(seconds % 60)
+        return string.format("%d:%02d", mins, secs)
+    end,
+
+    -- Truncate text safely
+    truncate = function(text, maxLen)
+        text = tostring(text or "")
+        return #text > maxLen and (text:sub(1, maxLen - 3) .. "...") or text
+    end,
+
+    -- UUID generation for sessions
+    uuid = function()
+        return string.format("%x%x%x%x",
+            math.random(0, 0xffff), math.random(0, 0xffff),
+            math.random(0, 0xffff), math.random(0, 0xffff))
+    end,
+
+    -- Format bytes
+    formatBytes = function(bytes)
+        bytes = bytes or 0
+        if bytes < 1024 then
+            return bytes .. "B"
+        elseif bytes < 1024 * 1024 then
+            return string.format("%.1fKB", bytes / 1024)
+        else
+            return string.format("%.1fMB", bytes / (1024 * 1024))
+        end
+    end,
+
+    -- Shuffle table
+    shuffle = function(tbl)
+        local shuffled = {}
+        for i = 1, #tbl do shuffled[i] = tbl[i] end
+
+        for i = #shuffled, 2, -1 do
+            local j = math.random(1, i)
+            shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+        end
+        return shuffled
+    end
+}
+
 -- FILE OPERATIONS
 local function save_table_to_file(tbl, filename)
     local file = fs.open(filename, "w")
@@ -308,7 +405,7 @@ local function load_table_from_file(filename)
             local content = file.readAll()
             file.close()
             local success, result = pcall(textutils.unserialize, content)
-            if success then
+            if success and type(result) == "table" then
                 return result
             end
         end
@@ -334,16 +431,25 @@ function load_state()
 
     local loaded_settings = load_table_from_file(CONFIG.settings_file)
     if loaded_settings then
-        for k, v in pairs(loaded_settings) do
-            State.settings[k] = v
-        end
-        -- Apply loaded settings
-        CONFIG.api_base_url = State.settings.api_url
-        CONFIG.buffer_max = State.settings.buffer_size
-        CONFIG.audio_sample_rate = State.settings.sample_rate
-        CONFIG.audio_chunk_size = State.settings.chunk_size
-        apply_theme(State.settings.theme)
+        local s = State.settings
+        s.api_url             = type(loaded_settings.api_url) == "string" and loaded_settings.api_url or CONFIG.api_base_url
+        s.buffer_size         = tonumber(loaded_settings.buffer_size) or CONFIG.buffer_max
+        s.sample_rate         = tonumber(loaded_settings.sample_rate) or CONFIG.audio_sample_rate
+        s.chunk_size          = tonumber(loaded_settings.chunk_size) or CONFIG.audio_chunk_size
+        s.auto_play_next      = type(loaded_settings.auto_play_next) == "boolean" and loaded_settings.auto_play_next or true
+        s.show_visualization  = type(loaded_settings.show_visualization) == "boolean" and loaded_settings.show_visualization or true
+        s.theme               = THEMES[loaded_settings.theme] and loaded_settings.theme or "default"
+        s.sleep_timer         = tonumber(loaded_settings.sleep_timer) or 0
+        s.notifications       = type(loaded_settings.notifications) == "boolean" and loaded_settings.notifications or true
+        s.check_updates       = type(loaded_settings.check_updates) == "boolean" and loaded_settings.check_updates or true
     end
+
+    -- Apply loaded settings
+    CONFIG.api_base_url = State.settings.api_url
+    CONFIG.buffer_max = State.settings.buffer_size
+    CONFIG.audio_sample_rate = State.settings.sample_rate
+    CONFIG.audio_chunk_size = State.settings.chunk_size
+    apply_theme(State.settings.theme)
 end
 
 -- THEME SYSTEM
@@ -386,15 +492,16 @@ local function set_status(message, color, duration)
     redraw()
 end
 
--- UTILITY FUNCTIONS
+-- UTILITY FUNCTIONS (Original ones)
 local function format_time(seconds)
-    if not seconds or seconds == 0 then return "--:--" end
+    if not seconds or type(seconds) ~= "number" or seconds <= 0 then return "--:--" end
     local mins = math.floor(seconds / 60)
     local secs = math.floor(seconds % 60)
     return string.format("%d:%02d", mins, secs)
 end
 
 local function format_bytes(bytes)
+    bytes = bytes or 0
     if bytes < 1024 then
         return bytes .. "B"
     elseif bytes < 1024 * 1024 then
@@ -416,6 +523,7 @@ local function shuffle_table(tbl)
 end
 
 local function truncate_text(text, max_length)
+    text = text or ""
     if #text > max_length then
         return string.sub(text, 1, max_length - 3) .. "..."
     end
@@ -423,6 +531,7 @@ local function truncate_text(text, max_length)
 end
 
 local function find_song_in_favorites(song)
+    if not song or not song.id then return nil end
     for i, fav in ipairs(State.favorites) do
         if fav.id == song.id then
             return i
@@ -436,6 +545,7 @@ local function is_favorite(song)
 end
 
 local function toggle_favorite(song)
+    if not song or not song.id then return end
     local idx = find_song_in_favorites(song)
     if idx then
         table.remove(State.favorites, idx)
@@ -468,7 +578,7 @@ end
 
 local function draw_progress_bar(x, y, width, progress, bg_color, fg_color)
     paintutils.drawBox(x, y, x + width - 1, y, bg_color)
-    local filled = math.floor(width * progress)
+    local filled = math.floor(width * (progress or 0))
     if filled > 0 then
         paintutils.drawBox(x, y, x + filled - 1, y, fg_color)
     end
@@ -766,7 +876,7 @@ local function draw_mini_mode()
     end
 end
 
--- INTERACTIVE SCROLL BAR (unchanged from v3.0)
+-- INTERACTIVE SCROLL BAR
 local function draw_scroll_bar(x, start_y, height, total_items, visible_items, scroll_pos, scroll_type)
     if total_items <= visible_items then
         scroll_infos[scroll_type] = nil
@@ -888,25 +998,33 @@ end
 local function calculate_network_stats()
     local stats = {
         session_active = State.session_id ~= nil,
-        buffer_fill = math.floor((#State.buffer / CONFIG.buffer_max) * 100),
-        connection_errors = State.connection_errors,
-        avg_latency = State.avg_chunk_latency,
-        bytes_received = State.total_bytes_received,
-        chunks_downloaded = #State.downloaded_chunks,
-        uptime = State.session_id and (os.clock() - (State.stream_start_time or 0)) or 0
+        buffer_fill = math.floor((#State.buffer / (State.settings.buffer_size or CONFIG.buffer_max)) * 100),
+        connection_errors = State.connection_errors or 0,
+        avg_latency = State.avg_chunk_latency or 0,
+        bytes_received = State.total_bytes_received or 0,
+        chunks_downloaded = State.downloaded_chunks and #State.downloaded_chunks or 0,
+        uptime = (State.session_id and (os.clock() - (State.stream_start_time or os.clock()))) or 0
     }
     return stats
 end
 
--- Continue with drawing functions...
-
--- SCROLL HANDLERS (same as before)
+-- SCROLL HANDLERS
 local function handle_list_scroll(direction, list_type)
     local h = State.screen.height
-    local start_y = (list_type == "search") and 7 or 4
+    local start_y, item_height
+    if list_type == "search" then
+        start_y = 7
+        item_height = 2
+    elseif list_type == "settings" then
+        start_y = 4
+        item_height = 3
+    else
+        start_y = 4
+        item_height = 2
+    end
     local status_bar_height = 1
     local available_height = h - start_y - status_bar_height
-    local items_per_page = math.floor(available_height / 3)
+    local items_per_page = math.floor(available_height / item_height)
     items_per_page = math.max(1, items_per_page)
 
     local list, scroll_var
@@ -1010,10 +1128,10 @@ local function handle_queue_reorder_drag(y)
     local start_y = 4
     local status_bar_height = 1
     local available_height = h - start_y - status_bar_height
-    local items_per_page = math.floor(available_height / 3)
+    local items_per_page = math.floor(available_height / 2)
     items_per_page = math.max(1, items_per_page)
 
-    local hover_index = math.floor((y - start_y) / 3) + 1 + State.queue_scroll
+    local hover_index = math.floor((y - start_y) / 2) + 1 + State.queue_scroll
     hover_index = math.max(1, math.min(#State.queue, hover_index))
 
     if hover_index ~= State.drag_item_index then
@@ -1049,65 +1167,65 @@ local function update_playback_position()
     calculate_playback_position()
 end
 
--- DRAWING FUNCTIONS
-local function draw_tabs()
-    local w, h = State.screen.width, State.screen.height
-    term.setBackgroundColor(current_colors.tabs.inactive_bg)
-    term.setTextColor(current_colors.tabs.inactive_text)
-    term.setCursorPos(1, 1)
-    term.clearLine()
+-- DRAWING FUNCTIONS (Original from v4.3)
+local function draw_vertical_tabs(x, y, width, height)
+    -- Draw background for the tab list
+    paintutils.drawFilledBox(x, y, x + width - 1, y + height - 1, current_colors.tabs.inactive_bg)
+    term.setCursorPos(x, 1)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+    term.write(truncate_text(" CC Music", width-1))
 
-    local tabs = {" Playing ", " Search ", " Queue ", " Playlists ", " History ", " Favs ", " Settings ", " Diag "}
-    local tab_width = math.floor(w / #tabs)
+    local current_y = y + 2
+    for i, tab_info in ipairs(TAB_DATA) do
+        local is_active = (State.current_tab == tab_info.id)
 
-    for i, name in ipairs(tabs) do
-        local x = (i - 1) * tab_width + math.floor((tab_width - #name) / 2) + 1
-        term.setCursorPos(x, 1)
-
-        if State.current_tab == i then
+        if is_active then
             term.setBackgroundColor(current_colors.tabs.active_bg)
             term.setTextColor(current_colors.tabs.active_text)
         else
             term.setBackgroundColor(current_colors.tabs.inactive_bg)
             term.setTextColor(current_colors.tabs.inactive_text)
         end
-        term.write(name)
-    end
 
-    term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.white)
+        term.setCursorPos(x, current_y)
+        local text = " " .. tab_info.name
+        term.write(truncate_text(text, width))
+        current_y = current_y + 2
+        if current_y > height then break end
+    end
 end
 
-local function draw_status_bar()
-    local w, h = State.screen.width, State.screen.height
+local function draw_status_bar(width)
+    local h = State.screen.height
     term.setCursorPos(1, h)
     term.setBackgroundColor(colors.gray)
-    term.clearLine()
+    term.write(string.rep(" ", width))
 
     -- Status message
     if State.status_message then
         term.setTextColor(State.status_color)
-        local msg = truncate_text(State.status_message, w - 40)
+        local msg = truncate_text(State.status_message, math.max(10, width - 25))
         term.setCursorPos(2, h)
         term.write(msg)
     end
 
     -- Sleep timer
     if State.settings.sleep_timer_active then
-        local elapsed = os.clock() - State.sleep_timer_start
-        local remaining = State.settings.sleep_timer * 60 - elapsed
+        local elapsed = os.clock() - (State.sleep_timer_start or os.clock())
+        local remaining = (State.settings.sleep_timer or 0) * 60 - elapsed
         if remaining > 0 then
-            term.setCursorPos(w - 30, h)
+            term.setCursorPos(math.max(2, width - 25), h)
             term.setTextColor(colors.yellow)
             term.write("Sleep: " .. format_time(remaining))
         end
     end
 
     -- Connection status
-    term.setCursorPos(w - 15, h)
-    if State.connection_errors > 0 then
+    term.setCursorPos(math.max(2, width - 10), h)
+    if (State.connection_errors or 0) > 0 then
         term.setTextColor(current_colors.status.error)
-        term.write("Conn: Error")
+        term.write("Conn: Err")
     elseif State.is_streaming then
         term.setTextColor(current_colors.status.playing)
         term.write("Conn: OK")
@@ -1119,23 +1237,22 @@ local function draw_status_bar()
     term.setBackgroundColor(colors.black)
 end
 
-local function draw_song_info()
-    local w = State.screen.width
+local function draw_song_info(width)
     term.setCursorPos(2, 3)
     term.setBackgroundColor(colors.black)
 
     if State.current_song then
         term.setTextColor(colors.white)
-        local title = truncate_text(State.current_song.title or "Unknown", w - 12)
+        local title = truncate_text(State.current_song.title or "Unknown", width - 12)
         term.write(title)
 
         -- Info button
-        term.setCursorPos(w - 8, 3)
+        term.setCursorPos(width - 8, 3)
         term.setBackgroundColor(colors.gray)
         term.write(" i ")
 
         -- Favorite star
-        term.setCursorPos(w - 4, 3)
+        term.setCursorPos(width - 4, 3)
         if is_favorite(State.current_song) then
             term.setTextColor(colors.yellow)
             term.setBackgroundColor(colors.black)
@@ -1149,7 +1266,7 @@ local function draw_song_info()
         term.setCursorPos(2, 4)
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.lightGray)
-        local artist = truncate_text(State.current_song.artist or "Unknown", w - 4)
+        local artist = truncate_text(State.current_song.artist or "Unknown", width - 4)
         term.write(artist)
 
         -- Additional metadata
@@ -1160,7 +1277,7 @@ local function draw_song_info()
         end
 
         -- View count if available
-        if State.current_song.view_count then
+        if State.current_song.view_count and width > 35 then
             term.setCursorPos(20, 5)
             term.write("Views: " .. tostring(State.current_song.view_count))
         end
@@ -1170,7 +1287,7 @@ local function draw_song_info()
     end
 end
 
-local function draw_playback_status()
+local function draw_playback_status(width)
     term.setCursorPos(2, 7)
     term.setBackgroundColor(colors.black)
 
@@ -1189,9 +1306,7 @@ local function draw_playback_status()
     end
 end
 
-local function draw_progress()
-    local w = State.screen.width
-
+local function draw_progress(width)
     if State.current_song and State.total_duration > 0 then
         update_playback_position()
         term.setCursorPos(2, 9)
@@ -1199,27 +1314,28 @@ local function draw_progress()
         term.setTextColor(colors.white)
         term.write(format_time(State.playback_position) .. " / " .. format_time(State.total_duration))
 
-        draw_progress_bar(2, 10, w - 3, State.playback_position / State.total_duration,
+        draw_progress_bar(2, 10, width - 3, State.playback_position / State.total_duration,
                          current_colors.progress.bg, current_colors.progress.fg)
     end
 end
 
-local function draw_volume_control()
+local function draw_volume_control(width)
     term.setCursorPos(2, 12)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.write("Volume:")
 
-    draw_progress_bar(2, 13, 24, State.volume, current_colors.progress.bg, current_colors.progress.volume)
+    local bar_width = math.min(24, width - 10)
+    draw_progress_bar(2, 13, bar_width, State.volume, current_colors.progress.bg, current_colors.progress.volume)
 
     local percentage = math.floor(100 * (State.volume))
-    term.setCursorPos(27, 13)
+    term.setCursorPos(2 + bar_width + 1, 13)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.write(percentage .. "%")
 end
 
-local function draw_buffer_status()
+local function draw_buffer_status(width)
     term.setCursorPos(2, 15)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.cyan)
@@ -1227,7 +1343,7 @@ local function draw_buffer_status()
     term.write("Buffer: " .. #State.buffer .. " chunks (" .. buffer_percent .. "%)")
 end
 
-local function draw_control_buttons()
+local function draw_control_buttons(width)
     local button_y = 17
     local button_x = 2
 
@@ -1254,14 +1370,16 @@ local function draw_control_buttons()
     button_x = button_x + 6
 
     -- Shuffle
-    term.setCursorPos(button_x, button_y)
-    term.setBackgroundColor(State.shuffle and colors.green or colors.gray)
-    term.setTextColor(colors.white)
-    term.write(" Shuf ")
-    button_x = button_x + 7
+    if button_x + 7 < width then
+        term.setCursorPos(button_x, button_y)
+        term.setBackgroundColor(State.shuffle and colors.green or colors.gray)
+        term.setTextColor(colors.white)
+        term.write(" Shuf ")
+        button_x = button_x + 7
+    end
 
     -- Favorite
-    if State.current_song then
+    if State.current_song and button_x + 6 < width then
         term.setCursorPos(button_x, button_y)
         term.setBackgroundColor(is_favorite(State.current_song) and colors.yellow or colors.gray)
         term.setTextColor(colors.white)
@@ -1270,7 +1388,7 @@ local function draw_control_buttons()
     end
 
     -- Download
-    if State.current_song and #State.downloaded_chunks > 0 then
+    if State.current_song and #State.downloaded_chunks > 0 and button_x + 7 < width then
         term.setCursorPos(button_x, button_y)
         term.setBackgroundColor(colors.blue)
         term.setTextColor(colors.white)
@@ -1286,41 +1404,42 @@ local function draw_control_buttons()
 
     local vis_modes = {"Bars", "Wave", "Spec", "VU"}
     for i, mode in ipairs(vis_modes) do
-        term.setCursorPos(7 + (i-1) * 6, vis_y)
-        if State.visualization_mode == i then
-            term.setBackgroundColor(colors.green)
-            term.setTextColor(colors.white)
-        else
-            term.setBackgroundColor(colors.gray)
-            term.setTextColor(colors.white)
+        local x_pos = 7 + (i-1) * 6
+        if x_pos + 4 < width then
+            term.setCursorPos(x_pos, vis_y)
+            if State.visualization_mode == i then
+                term.setBackgroundColor(colors.green)
+                term.setTextColor(colors.white)
+            else
+                term.setBackgroundColor(colors.gray)
+                term.setTextColor(colors.white)
+            end
+            term.write(" " .. mode .. " ")
         end
-        term.write(" " .. mode .. " ")
     end
 
     term.setBackgroundColor(colors.black)
 end
 
-local function draw_now_playing()
+local function draw_now_playing(width)
     local h = State.screen.height
 
-    draw_song_info()
-    draw_playback_status()
-    draw_progress()
-    draw_volume_control()
-    draw_buffer_status()
-    draw_control_buttons()
+    draw_song_info(width)
+    draw_playback_status(width)
+    draw_progress(width)
+    draw_volume_control(width)
+    draw_buffer_status(width)
+    draw_control_buttons(width)
 
     -- Draw visualization
     if State.settings.show_visualization and h > 22 then
-        draw_visualization(2, 21, State.screen.width - 3, h - 22)
+        draw_visualization(2, 21, width - 3, h - 22)
     end
 end
 
-local function draw_search_box()
-    local w = State.screen.width
-
+local function draw_search_box(width)
     -- Search box
-    paintutils.drawFilledBox(2, 3, w - 1, 5, colors.lightGray)
+    paintutils.drawFilledBox(2, 3, width - 1, 5, colors.lightGray)
 
     term.setCursorPos(2, 2)
     term.setBackgroundColor(colors.black)
@@ -1331,9 +1450,9 @@ local function draw_search_box()
     term.setBackgroundColor(colors.lightGray)
     term.setTextColor(colors.black)
 
-    if State.waiting_input and not State.search_filter then
+    if State.waiting_input and State.input_context == "main_search" then
         term.write(State.input_text)
-        if #State.input_text < w - 6 then
+        if #State.input_text < width - 6 then
             term.setCursorBlink(true)
         end
     else
@@ -1346,32 +1465,37 @@ local function draw_search_box()
     end
 
     -- Filter box
-    if State.search_results and #State.search_results > 0 then
-        term.setCursorPos(w - 20, 6)
+    if State.search_results and #State.search_results > 0 and width > 30 then
+        term.setCursorPos(width - 20, 6)
         term.setBackgroundColor(colors.gray)
         term.setTextColor(colors.white)
         term.write(" Filter: ")
 
-        if State.waiting_input and State.search_filter ~= nil then
+        if State.waiting_input and State.input_context == "search_filter" then
             term.setBackgroundColor(colors.lightGray)
             term.setTextColor(colors.black)
-            term.write(State.search_filter .. "_")
+            term.write(State.input_text .. "_")
+            term.setCursorBlink(true)
         else
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.white)
             term.write(State.search_filter or "")
         end
     end
 
     term.setBackgroundColor(colors.black)
-    term.setCursorBlink(false)
+    if not State.waiting_input then
+      term.setCursorBlink(false)
+    end
 end
 
 -- Generic list drawer
-local function draw_list_items(list, list_type, start_y, with_actions, with_filter)
-    local w, h = State.screen.width, State.screen.height
+local function draw_list_items(list, list_type, start_y, with_actions, with_filter, width)
+    local h = State.screen.height
     local status_bar_height = 1
     local end_y = h - status_bar_height
-    local available_height = end_y - start_y
-    local items_per_page = math.floor(available_height / 3)
+    local available_height = end_y - start_y + 1
+    local items_per_page = math.floor(available_height / 2) -- 2 lines per item
     items_per_page = math.max(1, items_per_page)
 
     local scroll_var = list_type .. "_scroll"
@@ -1398,18 +1522,18 @@ local function draw_list_items(list, list_type, start_y, with_actions, with_filt
     end
 
     -- Draw scroll bar
-    draw_scroll_bar(w, start_y, available_height, #filtered_list, items_per_page, State[scroll_var], list_type)
+    draw_scroll_bar(width, start_y, available_height, #filtered_list, items_per_page, State[scroll_var], list_type)
 
     for i = 1, items_per_page do
         local idx = i + State[scroll_var]
         local item = filtered_list[idx]
         if not item then break end
-        local y = start_y + (i - 1) * 3
+        local y = start_y + (i - 1) * 2 -- 2 lines per item
 
-        if y <= end_y - 2 then
+        if y < end_y then
             -- Highlight selected
             if State.keyboard_nav_active and State.selected_index[State.current_tab] == idx then
-                paintutils.drawBox(2, y, w - 2, y + 1, current_colors.selected)
+                paintutils.drawBox(2, y, width - 2, y + 1, current_colors.selected)
             end
 
             term.setBackgroundColor(colors.black)
@@ -1421,7 +1545,7 @@ local function draw_list_items(list, list_type, start_y, with_actions, with_filt
                 term.setBackgroundColor(colors.blue)
             end
 
-            local title = truncate_text(item.title or "Unknown Title", w - 25)
+            local title = truncate_text(item.title or "Unknown Title", width - 15)
             term.write(idx .. ". " .. title)
 
             -- Favorite indicator
@@ -1433,41 +1557,41 @@ local function draw_list_items(list, list_type, start_y, with_actions, with_filt
             term.setCursorPos(5, y + 1)
             term.setBackgroundColor(colors.black)
             term.setTextColor(colors.lightGray)
-            local artist = truncate_text(item.artist or "Unknown Artist", w - 25)
+            local artist = truncate_text(item.artist or "Unknown Artist", width - 15)
             term.write(artist)
 
             -- Duration
-            if item.duration then
+            if item.duration and width > 30 then
                 local dur_str = format_time(item.duration)
-                term.setCursorPos(w - #dur_str - 12, y)
+                term.setCursorPos(width - #dur_str - 8, y)
                 term.setBackgroundColor(colors.black)
                 term.setTextColor(colors.gray)
                 term.write(dur_str)
             end
 
             -- Action buttons
-            if with_actions then
+            if with_actions and width > 35 then
                 if list_type == "search" or list_type == "history" or list_type == "favorites" then
                     -- Add button
-                    term.setCursorPos(w - 10, y + 1)
+                    term.setCursorPos(width - 6, y + 1)
                     term.setBackgroundColor(colors.green)
                     term.setTextColor(colors.white)
                     term.write(" + ")
 
                     -- Info button
-                    term.setCursorPos(w - 14, y + 1)
+                    term.setCursorPos(width - 10, y + 1)
                     term.setBackgroundColor(colors.gray)
                     term.write(" i ")
                 elseif list_type == "queue" then
                     -- Remove button
-                    term.setCursorPos(w - 7, y)
+                    term.setCursorPos(width - 4, y)
                     term.setBackgroundColor(colors.red)
                     term.setTextColor(colors.white)
                     term.write(" X ")
 
                     -- Move handle
-                    if State.keyboard_nav_active then
-                        term.setCursorPos(w - 12, y)
+                    if State.keyboard_nav_active and width > 40 then
+                        term.setCursorPos(width - 9, y)
                         term.setBackgroundColor(colors.gray)
                         term.setTextColor(colors.white)
                         term.write(" :: ")
@@ -1482,9 +1606,9 @@ local function draw_list_items(list, list_type, start_y, with_actions, with_filt
     return true
 end
 
-local function draw_search_results()
+local function draw_search_results(width)
     if State.search_results and #State.search_results > 0 then
-        draw_list_items(State.search_results, "search", 7, true, true)
+        draw_list_items(State.search_results, "search", 7, true, true, width)
     else
         scroll_infos.search = nil
         if State.search_error then
@@ -1501,29 +1625,28 @@ local function draw_search_results()
     end
 end
 
-local function draw_search()
-    draw_search_box()
-    draw_search_results()
+local function draw_search(width)
+    draw_search_box(width)
+    draw_search_results(width)
 end
 
-local function draw_queue_header()
-    local w = State.screen.width
+local function draw_queue_header(width)
     term.setCursorPos(2, 2)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.write("Queue (" .. #State.queue .. " songs):")
 
     -- Queue controls
-    term.setCursorPos(w - 28, 2)
+    term.setCursorPos(width - 28, 2)
     term.setBackgroundColor(colors.gray)
     term.setTextColor(colors.white)
     term.write(" Clear ")
 
-    term.setCursorPos(w - 20, 2)
+    term.setCursorPos(width - 20, 2)
     term.setBackgroundColor(State.shuffle and colors.green or colors.gray)
     term.write(" Shuffle ")
 
-    term.setCursorPos(w - 10, 2)
+    term.setCursorPos(width - 10, 2)
     term.setBackgroundColor(colors.gray)
     term.write(" Save ")
 
@@ -1534,10 +1657,11 @@ local function draw_queue_header()
         term.setTextColor(colors.gray)
         term.write("Filter: ")
 
-        if State.waiting_input and State.queue_filter ~= nil then
+        if State.waiting_input and State.input_context == "queue_filter" then
             term.setBackgroundColor(colors.lightGray)
             term.setTextColor(colors.black)
-            term.write(State.queue_filter .. "_")
+            term.write(State.input_text .. "_")
+            term.setCursorBlink(true)
         else
             term.setBackgroundColor(colors.gray)
             term.setTextColor(colors.white)
@@ -1546,41 +1670,40 @@ local function draw_queue_header()
     end
 
     term.setBackgroundColor(colors.black)
+    if not State.waiting_input then term.setCursorBlink(false) end
 end
 
-local function draw_queue()
-    draw_queue_header()
+local function draw_queue(width)
+    draw_queue_header(width)
 
     if #State.queue == 0 then
         scroll_infos.queue = nil
-        term.setCursorPos(2, 4)
+        term.setCursorPos(2, 5)
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.gray)
         term.write("Queue is empty")
-        term.setCursorPos(2, 5)
+        term.setCursorPos(2, 6)
         term.write("Add songs from Search tab")
     else
-        draw_list_items(State.queue, "queue", 4, true, true)
+        draw_list_items(State.queue, "queue", 4, true, true, width)
     end
 end
 
-local function draw_playlists()
-    local w = State.screen.width
-
+local function draw_playlists(width)
     term.setCursorPos(2, 2)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.write("Playlists:")
 
     -- New playlist button
-    term.setCursorPos(w - 12, 2)
+    term.setCursorPos(width - 12, 2)
     term.setBackgroundColor(colors.green)
     term.setTextColor(colors.white)
     term.write(" New ")
 
     -- Save queue as playlist
-    if #State.queue > 0 then
-        term.setCursorPos(w - 22, 2)
+    if #State.queue > 0 and width > 30 then
+        term.setCursorPos(width - 26, 2)
         term.setBackgroundColor(colors.blue)
         term.write(" Save Queue ")
     end
@@ -1594,7 +1717,10 @@ local function draw_playlists()
         term.setBackgroundColor(colors.lightGray)
         term.setTextColor(colors.black)
         term.write(State.playlist_input .. "_")
+        term.setCursorBlink(true)
         term.setBackgroundColor(colors.black)
+    else
+        term.setCursorBlink(false)
     end
 
     -- List playlists
@@ -1615,23 +1741,27 @@ local function draw_playlists()
                 term.setTextColor(colors.white)
                 term.write(i .. ". " .. name)
 
-                term.setCursorPos(25, y)
-                term.setTextColor(colors.gray)
-                term.write("(" .. #State.playlists[name].songs .. " songs)")
+                if width > 30 then
+                    term.setCursorPos(25, y)
+                    term.setTextColor(colors.gray)
+                    term.write("(" .. #State.playlists[name].songs .. " songs)")
+                end
 
                 -- Buttons
-                term.setCursorPos(w - 20, y)
-                term.setBackgroundColor(colors.green)
-                term.setTextColor(colors.white)
-                term.write(" Play ")
+                local btn_x = width - 7
+                term.setCursorPos(btn_x, y)
+                term.setBackgroundColor(colors.red)
+                term.write(" X ")
 
-                term.setCursorPos(w - 13, y)
+                btn_x = btn_x - 7
+                term.setCursorPos(btn_x, y)
                 term.setBackgroundColor(colors.blue)
                 term.write(" View ")
 
-                term.setCursorPos(w - 6, y)
-                term.setBackgroundColor(colors.red)
-                term.write(" X ")
+                btn_x = btn_x - 7
+                term.setCursorPos(btn_x, y)
+                term.setBackgroundColor(colors.green)
+                term.write(" Play ")
 
                 term.setBackgroundColor(colors.black)
                 y = y + 2
@@ -1640,15 +1770,14 @@ local function draw_playlists()
     end
 end
 
-local function draw_history()
+local function draw_history(width)
     term.setCursorPos(2, 2)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.write("Recently Played (" .. #State.history .. " songs):")
 
     if #State.history > 0 then
-        local w = State.screen.width
-        term.setCursorPos(w - 10, 2)
+        term.setCursorPos(width - 10, 2)
         term.setBackgroundColor(colors.gray)
         term.setTextColor(colors.white)
         term.write(" Clear ")
@@ -1659,10 +1788,11 @@ local function draw_history()
         term.setTextColor(colors.gray)
         term.write("Filter: ")
 
-        if State.waiting_input and State.history_filter ~= nil then
+        if State.waiting_input and State.input_context == "history_filter" then
             term.setBackgroundColor(colors.lightGray)
             term.setTextColor(colors.black)
-            term.write(State.history_filter .. "_")
+            term.write(State.input_text .. "_")
+            term.setCursorBlink(true)
         else
             term.setBackgroundColor(colors.gray)
             term.setTextColor(colors.white)
@@ -1671,6 +1801,7 @@ local function draw_history()
     end
 
     term.setBackgroundColor(colors.black)
+    if not State.waiting_input then term.setCursorBlink(false) end
 
     if #State.history == 0 then
         scroll_infos.history = nil
@@ -1678,19 +1809,18 @@ local function draw_history()
         term.setTextColor(colors.gray)
         term.write("No history yet")
     else
-        draw_list_items(State.history, "history", 4, true, true)
+        draw_list_items(State.history, "history", 4, true, true, width)
     end
 end
 
-local function draw_favorites()
+local function draw_favorites(width)
     term.setCursorPos(2, 2)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.write("Favorite Songs (" .. #State.favorites .. " songs):")
 
     if #State.favorites > 0 then
-        local w = State.screen.width
-        term.setCursorPos(w - 10, 2)
+        term.setCursorPos(width - 10, 2)
         term.setBackgroundColor(colors.gray)
         term.setTextColor(colors.white)
         term.write(" Clear ")
@@ -1701,10 +1831,11 @@ local function draw_favorites()
         term.setTextColor(colors.gray)
         term.write("Filter: ")
 
-        if State.waiting_input and State.favorites_filter ~= nil then
+        if State.waiting_input and State.input_context == "favorites_filter" then
             term.setBackgroundColor(colors.lightGray)
             term.setTextColor(colors.black)
-            term.write(State.favorites_filter .. "_")
+            term.write(State.input_text .. "_")
+            term.setCursorBlink(true)
         else
             term.setBackgroundColor(colors.gray)
             term.setTextColor(colors.white)
@@ -1713,6 +1844,7 @@ local function draw_favorites()
     end
 
     term.setBackgroundColor(colors.black)
+    if not State.waiting_input then term.setCursorBlink(false) end
 
     if #State.favorites == 0 then
         scroll_infos.favorites = nil
@@ -1722,12 +1854,12 @@ local function draw_favorites()
         term.setCursorPos(2, 5)
         term.write("Mark songs as favorite from Now Playing")
     else
-        draw_list_items(State.favorites, "favorites", 4, true, true)
+        draw_list_items(State.favorites, "favorites", 4, true, true, width)
     end
 end
 
-local function draw_settings()
-    local w, h = State.screen.width, State.screen.height
+local function draw_settings(width)
+    local h = State.screen.height
 
     term.setCursorPos(2, 2)
     term.setBackgroundColor(colors.black)
@@ -1750,9 +1882,11 @@ local function draw_settings()
     local start_y = 4
     local status_bar_height = 1
     local end_y = h - status_bar_height
-    local available_height = end_y - start_y
-    local items_per_page = math.floor(available_height / 3)
+    local available_height = end_y - start_y + 1
+    local items_per_page = math.floor(available_height / 3) -- 3 lines per setting
     items_per_page = math.max(1, items_per_page)
+
+    draw_scroll_bar(width, start_y, available_height, #settings_list, items_per_page, State.settings_scroll, "settings")
 
     for i = 1, items_per_page do
         local idx = i + State.settings_scroll
@@ -1761,49 +1895,52 @@ local function draw_settings()
 
         local y = start_y + (i - 1) * 3
 
-        term.setCursorPos(2, y)
-        term.setTextColor(colors.white)
-        term.write(setting.label .. ":")
-
-        term.setCursorPos(4, y + 1)
-
-        if State.editing_setting == setting.key then
-            term.setBackgroundColor(colors.lightGray)
-            term.setTextColor(colors.black)
-            term.write(State.input_text .. "_")
-        else
-            term.setBackgroundColor(colors.gray)
+        if y < end_y then
+            term.setCursorPos(2, y)
             term.setTextColor(colors.white)
-            term.write(" " .. setting.value .. " ")
-        end
+            term.write(setting.label .. ":")
 
-        -- Edit button
-        term.setCursorPos(w - 10, y)
-        term.setBackgroundColor(colors.blue)
-        term.setTextColor(colors.white)
-        term.write(" Edit ")
+            term.setCursorPos(4, y + 1)
 
-        -- Special buttons
-        if setting.key == "theme" then
-            term.setCursorPos(w - 16, y)
-            term.setBackgroundColor(colors.green)
-            term.write(" Apply ")
-        elseif setting.key == "sleep_timer" then
-            term.setCursorPos(w - 16, y)
-            if State.settings.sleep_timer_active then
-                term.setBackgroundColor(colors.red)
-                term.write(" Stop ")
+            if State.editing_setting == setting.key then
+                term.setBackgroundColor(colors.lightGray)
+                term.setTextColor(colors.black)
+                term.write(State.input_text .. "_")
+                term.setCursorBlink(true)
             else
+                term.setBackgroundColor(colors.gray)
+                term.setTextColor(colors.white)
+                term.write(" " .. tostring(setting.value or "") .. " ")
+            end
+
+            -- Edit button
+            term.setCursorPos(width - 10, y)
+            term.setBackgroundColor(colors.blue)
+            term.setTextColor(colors.white)
+            term.write(" Edit ")
+
+            -- Special buttons
+            if setting.key == "theme" and width > 40 then
+                term.setCursorPos(width - 16, y)
                 term.setBackgroundColor(colors.green)
-                term.write(" Start ")
+                term.write(" Apply ")
+            elseif setting.key == "sleep_timer" and width > 40 then
+                term.setCursorPos(width - 16, y)
+                if State.settings.sleep_timer_active then
+                    term.setBackgroundColor(colors.red)
+                    term.write(" Stop ")
+                else
+                    term.setBackgroundColor(colors.green)
+                    term.write(" Start ")
+                end
             end
         end
-
         term.setBackgroundColor(colors.black)
     end
+    if not State.waiting_input then term.setCursorBlink(false) end
 
     -- Save button
-    term.setCursorPos(w - 12, 2)
+    term.setCursorPos(width - 12, 2)
     term.setBackgroundColor(colors.green)
     term.setTextColor(colors.white)
     term.write(" Save All ")
@@ -1811,8 +1948,8 @@ local function draw_settings()
     term.setBackgroundColor(colors.black)
 end
 
-local function draw_diagnostics()
-    local w, h = State.screen.width, State.screen.height
+local function draw_diagnostics(width)
+    local h = State.screen.height
 
     term.setCursorPos(2, 2)
     term.setBackgroundColor(colors.black)
@@ -1823,13 +1960,15 @@ local function draw_diagnostics()
 
     local y = 4
     local function draw_stat(label, value, color)
-        term.setCursorPos(2, y)
-        term.setTextColor(colors.lightGray)
-        term.write(label .. ":")
-        term.setCursorPos(20, y)
-        term.setTextColor(color or colors.white)
-        term.write(tostring(value))
-        y = y + 1
+        if y < h - 1 then
+            term.setCursorPos(2, y)
+            term.setTextColor(colors.lightGray)
+            term.write(label .. ":")
+            term.setCursorPos(20, y)
+            term.setTextColor(color or colors.white)
+            term.write(tostring(value))
+            y = y + 1
+        end
     end
 
     draw_stat("Session Active", stats.session_active and "Yes" or "No",
@@ -1838,16 +1977,18 @@ local function draw_diagnostics()
               stats.buffer_fill > 50 and colors.green or colors.yellow)
     draw_stat("Connection Errors", stats.connection_errors,
               stats.connection_errors == 0 and colors.green or colors.red)
-    draw_stat("Avg Latency", string.format("%.1fms", stats.avg_latency * 1000))
+    draw_stat("Avg Latency", string.format("%.1fms", (stats.avg_latency or 0) * 1000))
     draw_stat("Bytes Received", format_bytes(stats.bytes_received))
     draw_stat("Chunks Downloaded", stats.chunks_downloaded)
     draw_stat("Session Uptime", format_time(stats.uptime))
 
     y = y + 1
-    term.setCursorPos(2, y)
-    term.setTextColor(colors.white)
-    term.write("Application Info:")
-    y = y + 2
+    if y < h - 1 then
+        term.setCursorPos(2, y)
+        term.setTextColor(colors.white)
+        term.write("Application Info:")
+        y = y + 2
+    end
 
     draw_stat("Version", CONFIG.version)
     draw_stat("Current Profile", State.current_profile)
@@ -1855,10 +1996,11 @@ local function draw_diagnostics()
     draw_stat("Songs in Queue", #State.queue)
     draw_stat("Songs in History", #State.history)
     draw_stat("Favorite Songs", #State.favorites)
-    draw_stat("Playlists", tostring(#State.playlists))
+    local p_count = 0; for _ in pairs(State.playlists) do p_count = p_count + 1 end
+    draw_stat("Playlists", tostring(p_count))
 
     -- Check for updates button
-    term.setCursorPos(w - 15, 2)
+    term.setCursorPos(width - 15, 2)
     term.setBackgroundColor(colors.blue)
     term.setTextColor(colors.white)
     term.write(" Check Updates ")
@@ -1875,28 +2017,31 @@ function redraw()
         return
     end
 
+    local content_width = State.screen.width - TAB_LIST_WIDTH
+    term.setBackgroundColor(colors.black)
     term.clear()
-    draw_tabs()
 
-    if State.current_tab == TABS.NOW_PLAYING then
-        draw_now_playing()
-    elseif State.current_tab == TABS.SEARCH then
-        draw_search()
-    elseif State.current_tab == TABS.QUEUE then
-        draw_queue()
-    elseif State.current_tab == TABS.PLAYLISTS then
-        draw_playlists()
-    elseif State.current_tab == TABS.HISTORY then
-        draw_history()
-    elseif State.current_tab == TABS.FAVORITES then
-        draw_favorites()
-    elseif State.current_tab == TABS.SETTINGS then
-        draw_settings()
-    elseif State.current_tab == TABS.DIAGNOSTICS then
-        draw_diagnostics()
+    local tab_draw_functions = {
+        [TABS.NOW_PLAYING] = draw_now_playing,
+        [TABS.SEARCH]      = draw_search,
+        [TABS.QUEUE]       = draw_queue,
+        [TABS.PLAYLISTS]   = draw_playlists,
+        [TABS.HISTORY]     = draw_history,
+        [TABS.FAVORITES]   = draw_favorites,
+        [TABS.SETTINGS]    = draw_settings,
+        [TABS.DIAGNOSTICS] = draw_diagnostics
+    }
+
+    local draw_func = tab_draw_functions[State.current_tab]
+    if draw_func then
+        draw_func(content_width)
     end
 
-    draw_status_bar()
+    -- Draw the tab list on the right
+    draw_vertical_tabs(content_width + 1, 1, TAB_LIST_WIDTH, State.screen.height)
+
+    -- Draw status bar
+    draw_status_bar(content_width)
 
     -- Draw popup if active
     if State.show_popup and State.popup_content then
@@ -2135,10 +2280,8 @@ local function play_next_song()
     end
 end
 
--- INPUT HANDLERS
-local function handle_now_playing_click(x, y)
-    local w = State.screen.width
-
+-- INPUT HANDLERS (All original ones restored)
+local function handle_now_playing_click(x, y, width)
     -- Volume control
     if y == 13 and x >= 2 and x <= 25 then
         State.volume = ((x - 2) / 23)
@@ -2148,13 +2291,13 @@ local function handle_now_playing_click(x, y)
     end
 
     -- Info button
-    if State.current_song and y == 3 and x >= w - 8 and x <= w - 6 then
+    if State.current_song and y == 3 and x >= width - 8 and x <= width - 6 then
         show_song_info_popup(State.current_song)
         return
     end
 
     -- Favorite star
-    if State.current_song and y == 3 and x >= w - 4 and x <= w - 3 then
+    if State.current_song and y == 3 and x >= width - 4 and x <= width - 3 then
         toggle_favorite(State.current_song)
         redraw()
         return
@@ -2196,7 +2339,6 @@ local function handle_now_playing_click(x, y)
 
     -- Visualization mode buttons
     if y == 19 then
-        local vis_modes = {"Bars", "Wave", "Spec", "VU"}
         for i = 1, 4 do
             local btn_x = 7 + (i-1) * 6
             if x >= btn_x and x <= btn_x + 4 then
@@ -2260,12 +2402,14 @@ local function add_to_queue(song)
     redraw()
 end
 
-local function handle_list_click(x, y, list, list_type, start_y)
-    local w = State.screen.width
+-- Continue with all the original click handlers and input handlers...
+-- [The rest continues with all the original functions exactly as they were]
+
+local function handle_list_click(x, y, list, list_type, start_y, width)
     local h = State.screen.height
     local status_bar_height = 1
     local available_height = h - start_y - status_bar_height
-    local items_per_page = math.floor(available_height / 3)
+    local items_per_page = math.floor(available_height / 2)
     items_per_page = math.max(1, items_per_page)
 
     local scroll_var = list_type .. "_scroll"
@@ -2277,17 +2421,17 @@ local function handle_list_click(x, y, list, list_type, start_y)
         filtered_list = filter_list(list, State[filter_var])
     end
 
-    local index = math.floor((y - start_y) / 3) + 1
+    local index = math.floor((y - start_y) / 2) + 1
     local idx = index + State[scroll_var]
 
     if idx >= 1 and idx <= #filtered_list then
         local item = filtered_list[idx]
-        local item_y = start_y + (index - 1) * 3
+        local item_y = start_y + (index - 1) * 2
 
         -- Check action buttons
-        if list_type == "queue" then
+        if list_type == "queue" and width > 35 then
             -- Remove button
-            if y == item_y and x >= w - 7 and x <= w - 5 then
+            if y == item_y and x >= width - 4 and x <= width - 2 then
                 table.remove(State.queue, idx)
                 local max_scroll = math.max(0, #State.queue - items_per_page)
                 State[scroll_var] = math.min(State[scroll_var], max_scroll)
@@ -2297,17 +2441,17 @@ local function handle_list_click(x, y, list, list_type, start_y)
                 return true
             end
             -- Move handle
-            if y == item_y and x >= w - 12 and x <= w - 9 then
+            if y == item_y and x >= width - 9 and x <= width - 6 then
                 State.dragging_queue_item = true
                 State.drag_item_index = idx
                 redraw()
                 return true
             end
-        elseif y == item_y + 1 and x >= w - 10 and x <= w - 8 then
+        elseif y == item_y + 1 and x >= width - 6 and x <= width - 4 then
             -- Add button
             add_to_queue(item)
             return true
-        elseif y == item_y + 1 and x >= w - 14 and x <= w - 12 then
+        elseif y == item_y + 1 and x >= width - 10 and x <= width - 8 then
             -- Info button
             show_song_info_popup(item)
             return true
@@ -2334,9 +2478,7 @@ local function handle_list_click(x, y, list, list_type, start_y)
     return false
 end
 
-local function handle_search_click(x, y)
-    local w = State.screen.width
-
+local function handle_search_click(x, y, width)
     -- Check scroll bar
     if scroll_infos.search and x == scroll_infos.search.x then
         handle_scroll_bar_click(scroll_infos.search, y, "search")
@@ -2344,34 +2486,32 @@ local function handle_search_click(x, y)
     end
 
     -- Search box
-    if y >= 3 and y <= 5 and x >= 2 and x <= w - 1 then
+    if y >= 3 and y <= 5 and x >= 2 and x <= width - 1 then
         State.waiting_input = true
+        State.input_context = "main_search"
         State.input_text = ""
         State.search_results = nil
         State.search_error = nil
-        State.search_filter = nil
         redraw()
         return
     end
 
     -- Filter box
-    if y == 6 and x >= w - 20 and x <= w - 2 then
+    if State.search_results and #State.search_results > 0 and y == 6 and x >= width - 20 and x <= width - 2 then
         State.waiting_input = true
+        State.input_context = "search_filter"
         State.input_text = State.search_filter or ""
-        State.search_filter = ""
         redraw()
         return
     end
 
     -- Results
     if State.search_results then
-        handle_list_click(x, y, State.search_results, "search", 7)
+        handle_list_click(x, y, State.search_results, "search", 7, width)
     end
 end
 
-local function handle_queue_click(x, y)
-    local w = State.screen.width
-
+local function handle_queue_click(x, y, width)
     -- Check scroll bar
     if scroll_infos.queue and x == scroll_infos.queue.x then
         handle_scroll_bar_click(scroll_infos.queue, y, "queue")
@@ -2379,7 +2519,7 @@ local function handle_queue_click(x, y)
     end
 
     -- Clear button
-    if y == 2 and x >= w - 28 and x <= w - 22 then
+    if y == 2 and x >= width - 28 and x <= width - 22 then
         State.queue = {}
         State.queue_scroll = 0
         set_status("Queue cleared", colors.white, 2)
@@ -2389,7 +2529,7 @@ local function handle_queue_click(x, y)
     end
 
     -- Shuffle button
-    if y == 2 and x >= w - 20 and x <= w - 11 then
+    if y == 2 and x >= width - 20 and x <= width - 11 then
         if #State.queue > 0 then
             State.queue = shuffle_table(State.queue)
             set_status("Queue shuffled", colors.white, 2)
@@ -2400,41 +2540,41 @@ local function handle_queue_click(x, y)
     end
 
     -- Save button
-    if y == 2 and x >= w - 10 and x <= w - 5 then
+    if y == 2 and x >= width - 10 and x <= width - 5 then
         save_state()
         set_status("Queue saved", current_colors.status.playing, 2)
         return
     end
 
     -- Filter
-    if y == 3 and x >= 10 and x <= w - 2 then
+    if y == 3 and x >= 10 and x <= width - 2 then
         State.waiting_input = true
+        State.input_context = "queue_filter"
         State.input_text = State.queue_filter or ""
-        State.queue_filter = ""
         redraw()
         return
     end
 
     -- Queue items
-    handle_list_click(x, y, State.queue, "queue", 4)
+    handle_list_click(x, y, State.queue, "queue", 4, width)
 end
 
-local function handle_playlists_click(x, y)
-    local w = State.screen.width
-
+local function handle_playlists_click(x, y, width)
     -- New playlist
-    if y == 2 and x >= w - 12 and x <= w - 8 then
+    if y == 2 and x >= width - 12 and x <= width - 8 then
         State.editing_playlist = true
         State.waiting_input = true
+        State.input_context = "playlist_new"
         State.playlist_input = ""
         redraw()
         return
     end
 
     -- Save queue as playlist
-    if y == 2 and x >= w - 22 and x <= w - 11 and #State.queue > 0 then
+    if y == 2 and x >= width - 26 and x <= width - 15 and #State.queue > 0 then
         State.editing_playlist = true
         State.waiting_input = true
+        State.input_context = "playlist_save_queue"
         State.playlist_input = "Queue " .. os.date("%Y-%m-%d")
         redraw()
         return
@@ -2448,9 +2588,10 @@ local function handle_playlists_click(x, y)
     end
 
     for i, name in ipairs(playlist_names) do
-        if y == y_pos then
+        if y >= y_pos and y <= y_pos+1 then
+            local btn_x_play = width - 21
             -- Play button
-            if x >= w - 20 and x <= w - 15 then
+            if x >= btn_x_play and x < btn_x_play + 6 then
                 State.queue = {}
                 for _, song in ipairs(State.playlists[name].songs) do
                     table.insert(State.queue, song)
@@ -2460,7 +2601,7 @@ local function handle_playlists_click(x, y)
                 return
             end
             -- View button
-            if x >= w - 13 and x <= w - 8 then
+            if x >= btn_x_play + 7 and x < btn_x_play + 13 then
                 State.selected_playlist = name
                 State.current_tab = TABS.QUEUE
                 State.queue = {}
@@ -2472,7 +2613,7 @@ local function handle_playlists_click(x, y)
                 return
             end
             -- Delete button
-            if x >= w - 6 and x <= w - 4 then
+            if x >= btn_x_play + 14 and x < btn_x_play + 18 then
                 State.playlists[name] = nil
                 save_state()
                 set_status("Deleted playlist: " .. name, current_colors.status.error, 2)
@@ -2484,9 +2625,7 @@ local function handle_playlists_click(x, y)
     end
 end
 
-local function handle_history_click(x, y)
-    local w = State.screen.width
-
+local function handle_history_click(x, y, width)
     -- Check scroll bar
     if scroll_infos.history and x == scroll_infos.history.x then
         handle_scroll_bar_click(scroll_infos.history, y, "history")
@@ -2494,7 +2633,7 @@ local function handle_history_click(x, y)
     end
 
     -- Clear button
-    if y == 2 and x >= w - 10 and x <= w - 4 and #State.history > 0 then
+    if y == 2 and x >= width - 10 and x <= width - 4 and #State.history > 0 then
         State.history = {}
         State.history_scroll = 0
         set_status("History cleared", colors.white, 2)
@@ -2504,21 +2643,19 @@ local function handle_history_click(x, y)
     end
 
     -- Filter
-    if y == 3 and x >= 10 and x <= w - 2 then
+    if y == 3 and x >= 10 and x <= width - 2 then
         State.waiting_input = true
+        State.input_context = "history_filter"
         State.input_text = State.history_filter or ""
-        State.history_filter = ""
         redraw()
         return
     end
 
     -- History items
-    handle_list_click(x, y, State.history, "history", 4)
+    handle_list_click(x, y, State.history, "history", 4, width)
 end
 
-local function handle_favorites_click(x, y)
-    local w = State.screen.width
-
+local function handle_favorites_click(x, y, width)
     -- Check scroll bar
     if scroll_infos.favorites and x == scroll_infos.favorites.x then
         handle_scroll_bar_click(scroll_infos.favorites, y, "favorites")
@@ -2526,7 +2663,7 @@ local function handle_favorites_click(x, y)
     end
 
     -- Clear button
-    if y == 2 and x >= w - 10 and x <= w - 4 and #State.favorites > 0 then
+    if y == 2 and x >= width - 10 and x <= width - 4 and #State.favorites > 0 then
         State.favorites = {}
         State.favorites_scroll = 0
         set_status("Favorites cleared", colors.white, 2)
@@ -2536,23 +2673,27 @@ local function handle_favorites_click(x, y)
     end
 
     -- Filter
-    if y == 3 and x >= 10 and x <= w - 2 then
+    if y == 3 and x >= 10 and x <= width - 2 then
         State.waiting_input = true
+        State.input_context = "favorites_filter"
         State.input_text = State.favorites_filter or ""
-        State.favorites_filter = ""
         redraw()
         return
     end
 
     -- Favorite items
-    handle_list_click(x, y, State.favorites, "favorites", 4)
+    handle_list_click(x, y, State.favorites, "favorites", 4, width)
 end
 
-local function handle_settings_click(x, y)
-    local w = State.screen.width
+local function handle_settings_click(x, y, width)
+    -- Check for scroll bar click first
+    if scroll_infos.settings and x == scroll_infos.settings.x then
+        handle_scroll_bar_click(scroll_infos.settings, y, "settings")
+        return
+    end
 
     -- Save All button
-    if y == 2 and x >= w - 12 and x <= w - 3 then
+    if y == 2 and x >= width - 12 and x <= width - 3 then
         CONFIG.api_base_url = State.settings.api_url
         CONFIG.buffer_max = State.settings.buffer_size
         CONFIG.audio_sample_rate = State.settings.sample_rate
@@ -2589,7 +2730,7 @@ local function handle_settings_click(x, y)
         local item_y = start_y + (index - 1) * 3
 
         -- Edit button
-        if y == item_y and x >= w - 10 and x <= w - 5 then
+        if y == item_y and x >= width - 10 and x <= width - 5 then
             if setting.type == "boolean" then
                 State.settings[setting.key] = not State.settings[setting.key]
                 redraw()
@@ -2607,17 +2748,18 @@ local function handle_settings_click(x, y)
             else
                 State.editing_setting = setting.key
                 State.waiting_input = true
+                State.input_context = "setting_edit"
                 State.input_text = tostring(State.settings[setting.key])
                 redraw()
             end
         end
 
         -- Special buttons
-        if setting.key == "theme" and y == item_y and x >= w - 16 and x <= w - 11 then
+        if setting.key == "theme" and y == item_y and x >= width - 16 and x <= width - 11 then
             apply_theme(State.settings.theme)
             set_status("Applied theme: " .. State.settings.theme, colors.white, 2)
             redraw()
-        elseif setting.key == "sleep_timer" and y == item_y and x >= w - 16 and x <= w - 11 then
+        elseif setting.key == "sleep_timer" and y == item_y and x >= width - 16 and x <= width - 11 then
             if State.settings.sleep_timer_active then
                 State.settings.sleep_timer_active = false
                 set_status("Sleep timer stopped", colors.white, 2)
@@ -2631,11 +2773,9 @@ local function handle_settings_click(x, y)
     end
 end
 
-local function handle_diagnostics_click(x, y)
-    local w = State.screen.width
-
+local function handle_diagnostics_click(x, y, width)
     -- Check updates button
-    if y == 2 and x >= w - 15 and x <= w - 2 then
+    if y == 2 and x >= width - 15 and x <= width - 2 then
         check_for_updates()
         set_status("Checking for updates...", colors.yellow, 2)
     end
@@ -2661,17 +2801,54 @@ local function handle_popup_click(x, y)
     return false
 end
 
-local function handle_search_input(char, key)
+local function handle_input(char, key)
+    if not State.waiting_input then return end
+
     if char then
         State.input_text = State.input_text .. char
+        if State.editing_playlist then State.playlist_input = State.input_text end
         redraw()
-    elseif key then
-        if key == keys.enter then
-            State.waiting_input = false
-            term.setCursorBlink(false)
+        return
+    end
+    if not key then return end
 
-            if State.editing_setting then
-                local setting_key = State.editing_setting
+    if key == keys.enter then
+        State.waiting_input = false
+        term.setCursorBlink(false)
+        local context = State.input_context
+
+        if context == "main_search" then
+            State.last_query = State.input_text
+            if State.last_query ~= "" then
+                State.last_search_url = State.settings.api_url .. "/?search=" .. textutils.urlEncode(State.last_query)
+                State.search_results = nil
+                State.search_error = nil
+                set_status("Searching...", current_colors.status.loading)
+                http.request(State.last_search_url)
+            end
+        elseif context == "search_filter" then
+            State.search_filter = State.input_text
+        elseif context == "queue_filter" then
+            State.queue_filter = State.input_text
+        elseif context == "history_filter" then
+            State.history_filter = State.input_text
+        elseif context == "favorites_filter" then
+            State.favorites_filter = State.input_text
+        elseif context == "playlist_new" or context == "playlist_save_queue" then
+             if State.playlist_input ~= "" then
+                create_playlist(State.playlist_input)
+                if context == "playlist_save_queue" and #State.queue > 0 then
+                    local songs_copy = {}
+                    for _, s in ipairs(State.queue) do table.insert(songs_copy, s) end
+                    State.playlists[State.playlist_input].songs = songs_copy
+                    save_state()
+                end
+            end
+            State.editing_playlist = false
+            State.playlist_input = ""
+        elseif context == "setting_edit" then
+            local setting_key = State.editing_setting
+            if setting_key then
                 if setting_key == "buffer_size" or setting_key == "sample_rate" or
                    setting_key == "chunk_size" or setting_key == "sleep_timer" then
                     local num_value = tonumber(State.input_text)
@@ -2679,52 +2856,27 @@ local function handle_search_input(char, key)
                 else
                     State.settings[setting_key] = State.input_text
                 end
-                State.editing_setting = nil
-                set_status("Setting updated", colors.white, 2)
-            elseif State.editing_playlist then
-                if State.input_text ~= "" then
-                    create_playlist(State.input_text)
-                    if #State.queue > 0 then
-                        State.playlists[State.input_text].songs = State.queue
-                        save_state()
-                    end
-                end
-                State.editing_playlist = false
-                State.playlist_input = ""
-            elseif State.search_filter ~= nil then
-                State.search_filter = State.input_text
-            elseif State.queue_filter ~= nil then
-                State.queue_filter = State.input_text
-            elseif State.history_filter ~= nil then
-                State.history_filter = State.input_text
-            elseif State.favorites_filter ~= nil then
-                State.favorites_filter = State.input_text
-            else
-                -- Normal search
-                State.last_query = State.input_text
-                if State.last_query ~= "" then
-                    State.last_search_url = State.settings.api_url .. "/?search=" .. textutils.urlEncode(State.last_query)
-                    State.search_results = nil
-                    State.search_error = nil
-                    set_status("Searching...", current_colors.status.loading)
-                    http.request(State.last_search_url)
-                end
             end
-            redraw()
-        elseif key == keys.backspace and #State.input_text > 0 then
-            State.input_text = string.sub(State.input_text, 1, #State.input_text - 1)
-            redraw()
-        elseif key == keys.escape then
-            State.waiting_input = false
-            State.input_text = ""
             State.editing_setting = nil
-            State.editing_playlist = false
-            State.search_filter = nil
-            State.queue_filter = nil
-            State.history_filter = nil
-            State.favorites_filter = nil
-            redraw()
+            set_status("Setting updated", colors.white, 2)
         end
+
+        State.input_context = nil
+        State.input_text = ""
+        redraw()
+
+    elseif key == keys.backspace and #State.input_text > 0 then
+        State.input_text = string.sub(State.input_text, 1, #State.input_text - 1)
+        if State.editing_playlist then State.playlist_input = State.input_text end
+        redraw()
+    elseif key == keys.escape then
+        State.waiting_input = false
+        State.input_text = ""
+        State.input_context = nil
+        State.editing_setting = nil
+        State.editing_playlist = false
+        term.setCursorBlink(false)
+        redraw()
     end
 end
 
@@ -2758,28 +2910,28 @@ local function handle_keyboard_navigation(key)
         if State.current_tab == TABS.SEARCH and State.search_results then
             State.selected_index[TABS.SEARCH] = math.min(#State.search_results, State.selected_index[TABS.SEARCH] + 1)
             local h = State.screen.height
-            local items_per_page = math.floor((h - 8) / 3)
+            local items_per_page = math.floor((h - 8) / 2)
             if State.selected_index[TABS.SEARCH] > State.search_scroll + items_per_page then
                 handle_list_scroll("down", "search")
             end
         elseif State.current_tab == TABS.QUEUE then
             State.selected_index[TABS.QUEUE] = math.min(#State.queue, State.selected_index[TABS.QUEUE] + 1)
             local h = State.screen.height
-            local items_per_page = math.floor((h - 5) / 3)
+            local items_per_page = math.floor((h - 5) / 2)
             if State.selected_index[TABS.QUEUE] > State.queue_scroll + items_per_page then
                 handle_list_scroll("down", "queue")
             end
         elseif State.current_tab == TABS.HISTORY then
             State.selected_index[TABS.HISTORY] = math.min(#State.history, State.selected_index[TABS.HISTORY] + 1)
             local h = State.screen.height
-            local items_per_page = math.floor((h - 5) / 3)
+            local items_per_page = math.floor((h - 5) / 2)
             if State.selected_index[TABS.HISTORY] > State.history_scroll + items_per_page then
                 handle_list_scroll("down", "history")
             end
         elseif State.current_tab == TABS.FAVORITES then
             State.selected_index[TABS.FAVORITES] = math.min(#State.favorites, State.selected_index[TABS.FAVORITES] + 1)
             local h = State.screen.height
-            local items_per_page = math.floor((h - 5) / 3)
+            local items_per_page = math.floor((h - 5) / 2)
             if State.selected_index[TABS.FAVORITES] > State.favorites_scroll + items_per_page then
                 handle_list_scroll("down", "favorites")
             end
@@ -2829,27 +2981,34 @@ local function ui_loop()
                 -- Click was on popup, do nothing else
             elseif State.mini_mode then
                 handle_mini_mode_click(x, y)
-            elseif y == 1 then
-                local tab_width = State.screen.width / 8
-                State.current_tab = math.ceil(x / tab_width)
-                State.current_tab = math.max(1, math.min(8, State.current_tab))
-                redraw()
-            elseif State.current_tab == TABS.NOW_PLAYING then
-                handle_now_playing_click(x, y)
-            elseif State.current_tab == TABS.SEARCH then
-                handle_search_click(x, y)
-            elseif State.current_tab == TABS.QUEUE then
-                handle_queue_click(x, y)
-            elseif State.current_tab == TABS.PLAYLISTS then
-                handle_playlists_click(x, y)
-            elseif State.current_tab == TABS.HISTORY then
-                handle_history_click(x, y)
-            elseif State.current_tab == TABS.FAVORITES then
-                handle_favorites_click(x, y)
-            elseif State.current_tab == TABS.SETTINGS then
-                handle_settings_click(x, y)
-            elseif State.current_tab == TABS.DIAGNOSTICS then
-                handle_diagnostics_click(x, y)
+            else
+                local content_width = State.screen.width - TAB_LIST_WIDTH
+                if x > content_width then
+                    -- Click is in the tab list
+                    local tab_y_start = 3
+                    local tab_height = 2
+                    local clicked_index = math.floor((y - tab_y_start) / tab_height) + 1
+                    if clicked_index >= 1 and clicked_index <= #TAB_DATA then
+                        State.current_tab = TAB_DATA[clicked_index].id
+                        redraw()
+                    end
+                else
+                    -- Click is in the content area
+                    local click_handlers = {
+                        [TABS.NOW_PLAYING] = handle_now_playing_click,
+                        [TABS.SEARCH]      = handle_search_click,
+                        [TABS.QUEUE]       = handle_queue_click,
+                        [TABS.PLAYLISTS]   = handle_playlists_click,
+                        [TABS.HISTORY]     = handle_history_click,
+                        [TABS.FAVORITES]   = handle_favorites_click,
+                        [TABS.SETTINGS]    = handle_settings_click,
+                        [TABS.DIAGNOSTICS] = handle_diagnostics_click
+                    }
+                    local handler = click_handlers[State.current_tab]
+                    if handler then
+                        handler(x, y, content_width)
+                    end
+                end
             end
         elseif event == "mouse_drag" then
             if State.dragging_scroll then
@@ -2866,51 +3025,24 @@ local function ui_loop()
             State.dragging_scroll = false
             State.dragging_queue_item = false
         elseif event == "mouse_scroll" then
-            if State.current_tab == TABS.SEARCH then
-                if param1 == 1 then
-                    handle_list_scroll("down", "search")
-                else
-                    handle_list_scroll("up", "search")
-                end
-            elseif State.current_tab == TABS.QUEUE then
-                if param1 == 1 then
-                    handle_list_scroll("down", "queue")
-                else
-                    handle_list_scroll("up", "queue")
-                end
-            elseif State.current_tab == TABS.PLAYLISTS then
-                if param1 == 1 then
-                    handle_list_scroll("down", "playlists")
-                else
-                    handle_list_scroll("up", "playlists")
-                end
-            elseif State.current_tab == TABS.HISTORY then
-                if param1 == 1 then
-                    handle_list_scroll("down", "history")
-                else
-                    handle_list_scroll("up", "history")
-                end
-            elseif State.current_tab == TABS.FAVORITES then
-                if param1 == 1 then
-                    handle_list_scroll("down", "favorites")
-                else
-                    handle_list_scroll("up", "favorites")
-                end
-            elseif State.current_tab == TABS.SETTINGS then
-                if param1 == 1 then
-                    handle_list_scroll("down", "settings")
-                else
-                    handle_list_scroll("up", "settings")
-                end
+            local scroll_map = {
+                [TABS.SEARCH] = "search", [TABS.QUEUE] = "queue", [TABS.PLAYLISTS] = "playlists",
+                [TABS.HISTORY] = "history", [TABS.FAVORITES] = "favorites", [TABS.SETTINGS] = "settings"
+            }
+            local scroll_type = scroll_map[State.current_tab]
+            if scroll_type then
+                handle_list_scroll(param1 == 1 and "down" or "up", scroll_type)
             end
-        elseif event == "char" and State.waiting_input then
-            handle_search_input(param1, nil)
+        elseif event == "char" then
+            handle_input(param1, nil)
         elseif event == "key" then
             if State.waiting_input then
-                handle_search_input(nil, param1)
+                handle_input(nil, param1)
             elseif State.show_popup then
-                State.show_popup = false
-                redraw()
+                if param1 == keys.escape then
+                    State.show_popup = false
+                    redraw()
+                end
             elseif param1 == keys.escape then
                 if State.mini_mode then
                     State.mini_mode = false
@@ -2921,7 +3053,7 @@ local function ui_loop()
                 if State.mini_mode then
                     handle_mini_mode_click(2, 9)
                 else
-                    handle_now_playing_click(2, 17)
+                    handle_now_playing_click(2, 17, State.screen.width - TAB_LIST_WIDTH)
                 end
             elseif param1 == HOTKEYS.next then
                 play_next_song()
@@ -2947,28 +3079,22 @@ local function ui_loop()
             elseif param1 == HOTKEYS.help then
                 show_help_popup()
             elseif param1 == keys.space and State.current_tab == TABS.NOW_PLAYING then
-                handle_now_playing_click(2, 17)
+                handle_now_playing_click(2, 17, State.screen.width - TAB_LIST_WIDTH)
             elseif param1 == keys.tab then
-                State.current_tab = (State.current_tab % 8) + 1
+                State.current_tab = (State.current_tab % #TAB_DATA) + 1
                 redraw()
             elseif param1 == keys.up or param1 == keys.down or param1 == keys.enter or param1 == keys.delete then
                 handle_keyboard_navigation(param1)
             elseif param1 == keys.pageUp then
                 local tab_map = {
-                    [TABS.SEARCH] = "search",
-                    [TABS.QUEUE] = "queue",
-                    [TABS.HISTORY] = "history",
-                    [TABS.FAVORITES] = "favorites"
+                    [TABS.SEARCH] = "search", [TABS.QUEUE] = "queue", [TABS.HISTORY] = "history", [TABS.FAVORITES] = "favorites"
                 }
                 if tab_map[State.current_tab] then
                     for i = 1, 5 do handle_list_scroll("up", tab_map[State.current_tab]) end
                 end
             elseif param1 == keys.pageDown then
                 local tab_map = {
-                    [TABS.SEARCH] = "search",
-                    [TABS.QUEUE] = "queue",
-                    [TABS.HISTORY] = "history",
-                    [TABS.FAVORITES] = "favorites"
+                    [TABS.SEARCH] = "search", [TABS.QUEUE] = "queue", [TABS.HISTORY] = "history", [TABS.FAVORITES] = "favorites"
                 }
                 if tab_map[State.current_tab] then
                     for i = 1, 5 do handle_list_scroll("down", tab_map[State.current_tab]) end
@@ -3066,7 +3192,7 @@ end
 local function main()
     term.clear()
     term.setCursorPos(1, 1)
-    print("CC Music Player v4.0 - Ultimate Edition")
+    print("CC Music Player v5.0 - Ultra Modular with Original UI")
     print("Loading saved state...")
 
     load_state()
@@ -3077,6 +3203,9 @@ local function main()
     end
 
     print("Initializing...")
+    sleep(0.5)
+
+    redraw()
 
     parallel.waitForAny(ui_loop, audio_loop, http_loop, update_loop)
 end
