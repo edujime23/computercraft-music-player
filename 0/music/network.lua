@@ -120,12 +120,6 @@ local function request_chunk()
     end
 end
 
--- Update checker
-local function check_for_updates()
-    if not State.settings.check_updates then return end
-    http.request(config.CONFIG.update_check_url)
-end
-
 -- HTTP Response handlers
 local function handle_stream_start_response(response_text)
     local success, response = pcall(textutils.unserializeJSON, response_text)
@@ -202,30 +196,6 @@ local function handle_search_response(response_text)
     end
 end
 
-local function handle_update_check_response(response_text)
-    -- Parse JSON response instead of plain text
-    local success, version_data = pcall(textutils.unserializeJSON, response_text)
-
-    if success and version_data and version_data.main then
-        local latest_version = version_data.main
-        if utils.compare_versions(latest_version, config.CONFIG.version) > 0 then
-            set_status("Update available: v" .. latest_version, colors.yellow, 5)
-            show_notification("Update available: v" .. latest_version, 5)
-        else
-            set_status("You're on the latest version", colors.green, 3)
-        end
-    else
-        -- Fallback: try to parse as plain text (for backward compatibility)
-        local latest_version = response_text:match("^%d+%.%d+")
-        if latest_version and latest_version ~= config.CONFIG.version then
-            set_status("Update available: v" .. latest_version, colors.yellow, 5)
-            show_notification("Update available: v" .. latest_version, 5)
-        else
-            set_status("You're on the latest version", colors.green, 3)
-        end
-    end
-end
-
 local function handle_http_success(url, handle)
     local response_text = handle.readAll()
     local response_code = handle.getResponseCode()
@@ -237,8 +207,7 @@ local function handle_http_success(url, handle)
         handle_chunk_response(response_text, response_code)
     elseif url:find("search=") then
         handle_search_response(response_text)
-    elseif url == config.CONFIG.update_check_url then
-        handle_update_check_response(response_text)
+    -- REMOVED: Update check handling - now handled by update.lua
     end
 end
 
@@ -332,7 +301,7 @@ return {
     start_stream = start_stream,
     stop_current_stream = stop_current_stream,
     request_chunk = request_chunk,
-    check_for_updates = check_for_updates,
+    -- REMOVED: check_for_updates - moved to update.lua
     handle_http_success = handle_http_success,
     handle_http_failure = handle_http_failure,
     calculate_network_stats = calculate_network_stats,
@@ -343,6 +312,5 @@ return {
     -- Response handlers (exported for testing/debugging)
     handle_stream_start_response = handle_stream_start_response,
     handle_chunk_response = handle_chunk_response,
-    handle_search_response = handle_search_response,
-    handle_update_check_response = handle_update_check_response
+    handle_search_response = handle_search_response
 }

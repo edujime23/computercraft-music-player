@@ -7,8 +7,7 @@ local CONFIG = {
     update_interval = 0.25,
     audio_sample_rate = 48000,
     audio_chunk_size = 2^12,
-    version = "5.0",
-    update_check_url = "https://raw.githubusercontent.com/edujime23/computercraft-music-player/refs/heads/main/version.json", -- CHANGED
+    version = "4.0",
 
     -- File paths
     queue_file = "music_queue.dat",
@@ -20,15 +19,12 @@ local CONFIG = {
     profiles_file = "music_profiles.dat",
 
     -- UPDATER CONFIGURATION
-    repo_url = "https://raw.githubusercontent.com/edujime23/computercraft-music-player/main",
-    version_url = "https://raw.githubusercontent.com/edujime23/computercraft-music-player/main/version.json", -- CHANGED
+    repo_url = "https://raw.githubusercontent.com/edujime23/computercraft-music-player/refs/heads/main/",
+    version_url = "https://raw.githubusercontent.com/edujime23/computercraft-music-player/refs/heads/main/versions.json",
     backup_folder = "music_backup",
     temp_folder = "music_temp",
-    current_version = "5.0"
 }
 
--- Make current_version point to version
-CONFIG.current_version = CONFIG.version
 
 -- Rest of the file stays the same...
 local REPEAT_MODES = { OFF = 0, ONE = 1, ALL = 2 }

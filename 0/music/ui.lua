@@ -1720,9 +1720,15 @@ end
 local function handle_diagnostics_click(x, y, width)
     -- Check updates button
     if y == 2 and x >= width - 15 and x <= width - 2 then
-        if network then
-            network.check_for_updates()
-            set_status("Checking for updates...", colors.yellow, 2)
+        -- Use update.lua instead of network.lua
+        local update_module = require("update")
+        update_module.set_module_mode() -- Tell update.lua it's being used as module
+        local has_update, version_info = update_module.quick_check_for_updates()
+
+        if has_update then
+            set_status("Update available! Run update.lua to update", colors.yellow, 5)
+        else
+            set_status("You're on the latest version", colors.green, 3)
         end
     end
 end

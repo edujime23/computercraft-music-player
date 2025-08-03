@@ -11,6 +11,8 @@ local audio = require("/music/audio")
 local network = require("/music/network")
 local player = require("/music/player")
 local events = require("/music/events")
+local update = require("/music/update")
+
 
 -- Initialize speaker check
 local function check_speaker()
@@ -112,7 +114,7 @@ local function startup_checks()
     -- Check if update checking is enabled
     if State.settings.check_updates then
         print("✓ Checking for updates...")
-        network.check_for_updates()
+        update.check_for_updates()
     end
 
     -- Validate audio settings

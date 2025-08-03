@@ -60,8 +60,8 @@ function utils.shuffle(tbl)
     return shuffled
 end
 
--- Add this function to network.lua if it's not already there
-local function parse_version(version_str)
+-- NEW: Version comparison functions (moved from network.lua)
+function utils.parse_version(version_str)
     if not version_str then return {0, 0, 0} end
     local parts = {}
     for part in version_str:gmatch("([^%.]+)") do
@@ -74,8 +74,8 @@ local function parse_version(version_str)
 end
 
 function utils.compare_versions(v1, v2)
-    local ver1 = parse_version(v1)
-    local ver2 = parse_version(v2)
+    local ver1 = utils.parse_version(v1)
+    local ver2 = utils.parse_version(v2)
 
     for i = 1, 3 do
         if ver1[i] > ver2[i] then return 1 end
