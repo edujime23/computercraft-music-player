@@ -1,0 +1,22 @@
+{
+    "main": "5.0",
+    "modules": {
+        "config": "5.0",
+        "state": "5.0",
+        "utils": "5.0",
+        "theme": "5.0",
+        "storage": "5.0",
+        "ui": "5.0",
+        "audio": "5.0",
+        "network": "5.0",
+        "player": "5.0",
+        "events": "5.0",
+        "main": "5.0",
+        "update": "5.0"
+    },
+    "changelog": {
+        "5.0": "Initial modular release with auto-updater"
+    },
+    "release_date": "2024-12-19",
+    "download_url": "https://github.com/edujime23/computercraft-music-player"
+}
