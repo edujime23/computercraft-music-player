@@ -3,3 +3,4 @@ venv/
 .lua_history
 .shell_history
 mbs.lua
+.dat

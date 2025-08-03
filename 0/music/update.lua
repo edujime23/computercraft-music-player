@@ -1,11 +1,15 @@
 -- CC Music Player Update System
--- Handles automatic updates from GitHub repository (in-memory only)
+-- Handles automatic updates from GitHub repository (in-memory only, single-file backup)
 
 -- Fix require path since we're inside the music folder
 local config = require("/music/config")
+local utils = require("/music/utils")
 
 -- Module flag to determine if running as standalone or as module
 local is_module = false
+
+-- Backup file name
+local BACKUP_FILE = "music_backup.dat"
 
 -- Helper function to set status (works both standalone and as module)
 local function set_status(message, color, duration)
@@ -218,85 +222,135 @@ local function quick_check_for_updates()
     end
 end
 
-local function explore_remote_structure()
-    -- Check internet connection first
-    if not check_internet_connection() then
-        return nil, "No internet connection"
+local function explore_remote_structure(remote_versions)
+    local structure = { files = {}, folders = {} }
+    local base_url = "https://raw.githubusercontent.com/edujime23/computercraft-music-player/refs/heads/main/0"
+
+    if not remote_versions or not remote_versions.files then
+        return nil, "No file list in version.json"
     end
 
-    -- Get the file tree from GitHub API
-    local api_url = "https://api.github.com/repos/edujime23/computercraft-music-player/contents/music"
-    local success, content = download_to_memory(api_url)
-
-    if not success then
-        return nil, content -- content contains error message
-    end
-
-    local files = textutils.unserializeJSON(content)
-    if not files then
-        return nil, "Invalid response from server"
-    end
-
-    local structure = {
-        files = {},
-        folders = {}
-    }
-
-    for _, item in ipairs(files) do
-        if item.type == "file" and item.name:match("%.lua$") then
-            table.insert(structure.files, {
-                name = item.name,
-                path = item.name,
-                download_url = item.download_url
-            })
-        elseif item.type == "dir" then
-            table.insert(structure.folders, item.name)
-        end
+    for _, path in ipairs(remote_versions.files) do
+        -- Only update files in the music folder
+        local local_path = path:gsub("^/music/", "")
+        table.insert(structure.files, {
+            name = local_path,
+            path = local_path,
+            download_url = base_url .. path
+        })
     end
 
     return structure
 end
 
+-- Single-file backup system
 local function backup_current_installation()
-    if fs.exists(config.CONFIG.backup_folder) then
-        fs.delete(config.CONFIG.backup_folder)
-    end
+    local backup = {}
 
-    fs.makeDir(config.CONFIG.backup_folder)
-
-    -- Backup music folder files
-    local files = fs.list(".")
-    for _, file in ipairs(files) do
-        if file:match("%.lua$") then
-            fs.copy(file, config.CONFIG.backup_folder .. "/" .. file)
+    local ok, err = pcall(function()
+        -- Backup all .lua files in current directory (music folder)
+        local files = fs.list(".")
+        for _, file in ipairs(files) do
+            if file:match("%.lua$") and fs.exists(file) and not fs.isDir(file) then
+                local handle = fs.open(file, "r")
+                if handle then
+                    backup[file] = handle.readAll()
+                    handle.close()
+                else
+                    error("Could not read file: " .. file)
+                end
+            end
         end
-    end
 
-    -- Backup main file (go up one directory)
-    if fs.exists("../music.lua") then
-        fs.copy("../music.lua", config.CONFIG.backup_folder .. "/music.lua")
+        -- Backup main entry point if it exists
+        if fs.exists("../music.lua") and not fs.isDir("../music.lua") then
+            local handle = fs.open("../music.lua", "r")
+            if handle then
+                backup["../music.lua"] = handle.readAll()
+                handle.close()
+            else
+                error("Could not read main file: ../music.lua")
+            end
+        end
+
+        -- Save backup to single file
+        if fs.exists(BACKUP_FILE) then
+            fs.delete(BACKUP_FILE)
+        end
+
+        local backup_handle = fs.open(BACKUP_FILE, "w")
+        if not backup_handle then
+            error("Could not create backup file: " .. BACKUP_FILE)
+        end
+
+        backup_handle.write(textutils.serialize(backup))
+        backup_handle.close()
+    end)
+
+    if not ok then
+        set_status("Backup failed: " .. tostring(err), colors.red, 4)
+        return false
     end
 
     return true
 end
 
 local function restore_backup()
-    local files = fs.list(config.CONFIG.backup_folder)
-    for _, file in ipairs(files) do
-        if file:match("%.lua$") and file ~= "music.lua" then
-            if fs.exists(file) then
-                fs.delete(file)
-            end
-            fs.copy(config.CONFIG.backup_folder .. "/" .. file, file)
-        end
+    if not fs.exists(BACKUP_FILE) then
+        set_status("No backup file found!", colors.red, 4)
+        return false
     end
 
-    if fs.exists(config.CONFIG.backup_folder .. "/music.lua") then
-        if fs.exists("../music.lua") then
-            fs.delete("../music.lua")
+    local ok, err = pcall(function()
+        -- Read backup file
+        local backup_handle = fs.open(BACKUP_FILE, "r")
+        if not backup_handle then
+            error("Could not open backup file for reading: " .. BACKUP_FILE)
         end
-        fs.copy(config.CONFIG.backup_folder .. "/music.lua", "../music.lua")
+
+        local backup_data = backup_handle.readAll()
+        backup_handle.close()
+
+        local backup = textutils.unserialize(backup_data)
+        if type(backup) ~= "table" then
+            error("Backup file is corrupted or invalid")
+        end
+
+        -- Restore all files
+        for file_path, content in pairs(backup) do
+            -- Handle parent directory creation for ../music.lua
+            if file_path:find("/") then
+                local dir = file_path:match("(.+)/[^/]+$")
+                if dir and not fs.exists(dir) then
+                    fs.makeDir(dir)
+                end
+            end
+
+            -- Delete existing file if it exists
+            if fs.exists(file_path) then
+                fs.delete(file_path)
+            end
+
+            -- Write restored content
+            local restore_handle = fs.open(file_path, "w")
+            if not restore_handle then
+                error("Could not restore file: " .. file_path)
+            end
+
+            restore_handle.write(content)
+            restore_handle.close()
+        end
+
+        -- Clean up backup file
+        fs.delete(BACKUP_FILE)
+    end)
+
+    if not ok then
+        set_status("Restore failed: " .. tostring(err), colors.red, 4)
+        return false
     end
+
+    return true
 end
 
 -- Download updates to memory
@@ -343,16 +397,24 @@ local function apply_updates_from_memory(updated_files, file_contents)
         local content = file_contents[file_path]
 
         if content then
-            -- Write file directly from memory
-            if fs.exists(file_path) then
-                fs.delete(file_path)
-            end
+            local ok, err = pcall(function()
+                -- Write file directly from memory
+                if fs.exists(file_path) then
+                    fs.delete(file_path)
+                end
 
-            local file = fs.open(file_path, "w")
-            if file then
+                local file = fs.open(file_path, "w")
+                if not file then
+                    error("Could not open file for writing: " .. file_path)
+                end
+
                 file.write(content)
                 file.close()
                 success_count = success_count + 1
+            end)
+
+            if not ok then
+                set_status("Failed to update " .. file_path .. ": " .. tostring(err), colors.red, 3)
             end
         end
     end
@@ -367,13 +429,14 @@ local function perform_update(remote_versions, local_versions)
     if not backup_current_installation() then
         draw_update_ui("Update Failed", "Could not create backup.\nUpdate cancelled for safety.", {"OK"})
         wait_for_choice({"OK"})
+        utils.cleanup_screen()
         return false
     end
 
     draw_update_ui("Updating", "Exploring remote file structure...", nil)
 
     -- Get remote structure
-    local structure, err = explore_remote_structure()
+    local structure, err = explore_remote_structure(remote_versions)
     if not structure then
         if err == "No internet connection" then
             draw_update_ui("Update Failed", "⚠ No internet connection.\nCannot download updates.", {"OK"})
@@ -402,6 +465,7 @@ local function perform_update(remote_versions, local_versions)
 
         if not structure then
             wait_for_choice({"OK"})
+            utils.cleanup_screen()
             return false
         end
     end
@@ -417,9 +481,13 @@ local function perform_update(remote_versions, local_versions)
         local choice = wait_for_choice({"Restore Backup", "Continue Anyway"})
 
         if choice == 1 then
-            restore_backup()
-            draw_update_ui("Update Cancelled", "Backup restored successfully.", {"OK"})
+            if restore_backup() then
+                draw_update_ui("Update Cancelled", "Backup restored successfully.", {"OK"})
+            else
+                draw_update_ui("Restore Failed", "Could not restore backup!\nCheck files manually.", {"OK"})
+            end
             wait_for_choice({"OK"})
+            utils.cleanup_screen()
             return false
         end
     end
@@ -427,6 +495,7 @@ local function perform_update(remote_versions, local_versions)
     if #updated_files == 0 then
         draw_update_ui("No Updates Applied", "No files needed updating.", {"OK"})
         wait_for_choice({"OK"})
+        utils.cleanup_screen()
         return false
     end
 
@@ -437,20 +506,32 @@ local function perform_update(remote_versions, local_versions)
 
     -- Update main entry point if needed
     if not fs.exists("../music.lua") then
-        local file = fs.open("../music.lua", "w")
-        if file then
+        local ok, err = pcall(function()
+            local file = fs.open("../music.lua", "w")
+            if not file then
+                error("Could not create main entry point")
+            end
             file.write('require("/music/main")')
             file.close()
+        end)
+
+        if not ok then
+            set_status("Warning: Could not create main entry point: " .. tostring(err), colors.orange, 3)
         end
     end
 
-    draw_update_ui("Update Complete",
-        "Successfully updated " .. success_count .. " files!\n\n" ..
-        "Files updated:\n" .. table.concat(updated_files, "\n") .. "\n\n" ..
-        "Restart the music player to use new version.",
-        {"OK"})
-    wait_for_choice({"OK"})
+    -- Clean up backup file after successful update
+    if fs.exists(BACKUP_FILE) then
+        fs.delete(BACKUP_FILE)
+    end
 
+    draw_update_ui("Update Complete",
+    "Successfully updated " .. success_count .. " files!\n\n" ..
+    "Files updated:\n" .. table.concat(updated_files, "\n") .. "\n\n" ..
+    "Restart the music player to use new version.",
+    {"OK"})
+    wait_for_choice({"OK"})
+    utils.cleanup_screen()
     return true
 end
 
@@ -466,6 +547,7 @@ local function check_for_updates()
             "Update check has been skipped.",
             {"OK"})
         wait_for_choice({"OK"})
+        utils.cleanup_screen()
         return false
     end
 
@@ -480,6 +562,7 @@ local function check_for_updates()
             "Check your internet connection.",
             {"OK"})
         wait_for_choice({"OK"})
+        utils.cleanup_screen()
         return false
     end
 
@@ -499,6 +582,7 @@ local function check_for_updates()
     if not main_update_available and next(module_updates) == nil then
         draw_update_ui("No Updates Available", "You are running the latest version!\nCurrent: " .. local_versions.main, {"OK"})
         wait_for_choice({"OK"})
+        utils.cleanup_screen()
         return false
     end
 
@@ -531,5 +615,7 @@ return {
     get_local_versions = get_local_versions,
     get_remote_versions = get_remote_versions,
     compare_versions = compare_versions,
+    backup_current_installation = backup_current_installation,
+    restore_backup = restore_backup,
     set_module_mode = function() is_module = true end
 }

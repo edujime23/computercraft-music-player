@@ -18,5 +18,20 @@
         "5.0": "Initial modular release with auto-updater"
     },
     "release_date": "2024-12-19",
-    "download_url": "https://github.com/edujime23/computercraft-music-player"
+    "download_url": "https://github.com/edujime23/computercraft-music-player",
+    "files": [
+        "/music/main.lua",
+        "/music/audio.lua",
+        "/music/config.lua",
+        "/music/events.lua",
+        "/music/main.lua",
+        "/music/network.lua",
+        "/music/player.lua",
+        "/music/state.lua",
+        "/music/storage.lua",
+        "/music/theme.lua",
+        "/music/ui.lua",
+        "/music/update.lua",
+        "/music/utils.lua",
+    ]
 }

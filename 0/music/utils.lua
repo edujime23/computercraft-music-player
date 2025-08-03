@@ -84,4 +84,12 @@ function utils.compare_versions(v1, v2)
     return 0
 end
 
+function utils.cleanup_screen()
+    -- Reset terminal to default state
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+    term.clear()
+    term.setCursorPos(1, 1)
+end
+
 return utils

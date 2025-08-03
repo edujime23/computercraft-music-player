@@ -114,7 +114,51 @@ local function startup_checks()
     -- Check if update checking is enabled
     if State.settings.check_updates then
         print("✓ Checking for updates...")
-        update.check_for_updates()
+
+        -- Set module mode for update system
+        update.set_module_mode()
+
+        -- Perform quick check
+        local has_update = update.quick_check_for_updates()
+
+        -- If update available, offer to update
+        if has_update then
+            -- Clear and show transition
+            term.clear()
+            term.setCursorPos(1, 1)
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.yellow)
+            print("Update available! Press U to update, or any other key to skip...")
+
+            local timer = os.startTimer(5)
+            while true do
+                local event, param = os.pullEvent()
+                if event == "key" then
+                    os.cancelTimer(timer)
+                    if param == keys.u then
+                        -- Run full update
+                        update.check_for_updates()
+
+                        -- After update, clear and restart loading screen
+                        term.clear()
+                        term.setCursorPos(1, 1)
+                        term.setBackgroundColor(colors.black)
+                        term.setTextColor(colors.white)
+                        show_loading_screen()
+                        sleep(0.5)
+                    end
+                    break
+                elseif event == "timer" and param == timer then
+                    break
+                end
+            end
+
+            -- Restore terminal state
+            term.clear()
+            term.setCursorPos(1, 1)
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.white)
+        end
     end
 
     -- Validate audio settings
@@ -257,8 +301,6 @@ local function main()
             ui.show_notification("Welcome to CC Music Player v" .. config.CONFIG.version, 3)
         end
 
-        -- Start the main event loops
-        print("Starting event loops...")
         events.run()
     end
 
